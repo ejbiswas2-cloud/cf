@@ -40,3 +40,22 @@ No coding knowledge required.
 curl -fsSL https://raw.githubusercontent.com/ejbiswas2-cloud/cf/main/install.sh | sudo bash
 
 
+## 🚀 Fix
+
+sudo pkill -9 apt || true
+sudo pkill -9 apt-get || true
+sudo pkill -9 dpkg || true
+
+sudo rm -f /var/lib/apt/lists/lock
+sudo rm -f /var/cache/apt/archives/lock
+sudo rm -f /var/lib/dpkg/lock*
+sudo rm -f /var/cache/apt/srcpkgcache.bin
+
+sudo dpkg --configure -a
+sudo apt clean
+sudo apt update
+
+## 🚀 Fix 
+sudo apt install curl -y
+
+
