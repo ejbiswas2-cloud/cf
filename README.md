@@ -37,5 +37,6 @@ No coding knowledge required.
 ## 🚀 Installation (ONE COMMAND)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOURNAME/YOURREPO/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ejbiswas2-cloud/cf/main/install.sh | sudo bash
+
 
