@@ -15,7 +15,13 @@ fi
 # -------- Base packages --------
 apt update -y
 apt install -y curl wget python3-flask sqlite3 rclone mailutils
+# ---------- Preseed Postfix (NO QUESTIONS) ----------
+echo "postfix postfix/mailname string localhost" | debconf-set-selections
+echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selections
 
+# ---------- Base packages ----------
+apt update -y
+apt install -y curl wget python3-flask sqlite3 rclone mailutils
 # -------- aaPanel --------
 if [ ! -d /www/server/panel ]; then
   wget -O aapanel.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
