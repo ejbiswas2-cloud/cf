@@ -1,130 +1,164 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -e
 
-LOG="/opt/devops-panel/install.log"
-mkdir -p /opt/devops-panel
-exec > >(tee -a "$LOG") 2>&1
+APP="DashboardXE"
+PORT=9010
+BASE="/opt/dashboardxe"
+APPDIR="$BASE/app"
+USER="admin"
+PASS="admin"
 
-echo "=================================================="
-echo " 🚀 DEVOPS CONTROL PANEL INSTALLER"
-echo "=================================================="
+echo "🚀 Installing $APP on port $PORT"
 
-### 0. SYSTEM SAFETY
-export DEBIAN_FRONTEND=noninteractive
-dpkg --configure -a || true
-apt --fix-broken install -y || true
+# ---------- SYSTEM ----------
+apt update -y
+apt install -y curl ufw apache2 nodejs npm
 
-### 1. BASE PACKAGES
-apt update
-apt install -y \
-  ca-certificates curl gnupg lsb-release \
-  software-properties-common jq unzip git
-
-### 2. APACHE + PHP 8.3
-add-apt-repository -y ppa:ondrej/php
-apt update
-apt install -y \
-  apache2 \
-  php8.3 php8.3-cli php8.3-curl php8.3-mbstring \
-  php8.3-mysql php8.3-pgsql php8.3-xml php8.3-zip
-
-systemctl enable --now apache2
-
-### 3. NODE.JS LTS (20.x ONLY)
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt install -y nodejs
-
-### 4. PM2 (GLOBAL, ROOT)
 npm install -g pm2
-pm2 startup systemd -u root --hp /root || true
 
-### 5. DATABASES
-apt install -y mariadb-server postgresql postgresql-contrib
+ufw allow $PORT/tcp || true
 
-# MongoDB
-if [ ! -f /etc/apt/sources.list.d/mongodb-org.list ]; then
-  curl -fsSL https://pgp.mongodb.com/server-6.0.asc \
-    | gpg --dearmor -o /usr/share/keyrings/mongodb.gpg
-  echo "deb [signed-by=/usr/share/keyrings/mongodb.gpg] \
-https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" \
-    > /etc/apt/sources.list.d/mongodb-org.list
-fi
+mkdir -p $APPDIR/{public,file-root,ssl/certs,ssl/keys,backups/mysql,backups/postgres,backups/mongo}
 
-apt update
-apt install -y mongodb-org
-systemctl enable --now mongod mariadb postgresql
-
-### 6. DOCKER
-if ! command -v docker >/dev/null; then
-  curl -fsSL https://get.docker.com | bash
-fi
-systemctl enable --now docker
-
-### 7. DOCKER GUIs
-mkdir -p /opt/devops-panel/docker
-cat >/opt/devops-panel/docker/docker-compose.yml <<EOF
-version: "3.8"
-services:
-  phpmyadmin:
-    image: phpmyadmin
-    ports: ["8081:80"]
-    environment:
-      PMA_HOST: mariadb
-  pgadmin:
-    image: dpage/pgadmin4
-    ports: ["8082:80"]
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@local.dev
-      PGADMIN_DEFAULT_PASSWORD: admin123
-  mongo-express:
-    image: mongo-express
-    ports: ["8083:8081"]
-    environment:
-      ME_CONFIG_BASICAUTH_USERNAME: admin
-      ME_CONFIG_BASICAUTH_PASSWORD: admin
+# ---------- ENV ----------
+cat > $APPDIR/.env <<EOF
+PORT=$PORT
+JWT_SECRET=$(openssl rand -hex 32)
 EOF
 
-docker compose -f /opt/devops-panel/docker/docker-compose.yml up -d
-
-### 8. DASHBOARD APP
-mkdir -p /opt/devops-panel/dashboard
-cd /opt/devops-panel/dashboard
-
-cat >package.json <<EOF
+# ---------- PACKAGE ----------
+cat > $APPDIR/package.json <<EOF
 {
-  "name": "devops-dashboard",
+  "name": "dashboardxe",
   "version": "1.0.0",
   "main": "server.js",
   "dependencies": {
-    "express": "^4.19.0"
+    "express": "^4.19.2",
+    "bcrypt": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.0",
+    "archiver": "^6.0.2",
+    "dotenv": "^16.4.5"
   }
 }
 EOF
 
-npm install
+# ---------- SERVER ----------
+cat > $APPDIR/server.js <<'EOF'
+require("dotenv").config();
+const express=require("express");
+const fs=require("fs");
+const path=require("path");
+const bcrypt=require("bcrypt");
+const jwt=require("jsonwebtoken");
+const {execSync}=require("child_process");
 
-cat >server.js <<'EOF'
-const express = require("express");
-const app = express();
-const PORT = process.env.PORT || 9001;
+const app=express();
+app.use(express.json());
+app.use(express.static("public"));
 
-app.get("/", (req, res) => {
-  res.send("<h1>DevOps Control Panel</h1><p>Status: RUNNING</p>");
+const ROOT=path.resolve("file-root");
+const SERVICES=["apache2","mariadb","postgresql","mongod","docker"];
+const users={admin:bcrypt.hashSync("admin",10)};
+
+function auth(req,res,next){
+  try{
+    req.user=jwt.verify(req.headers.authorization,process.env.JWT_SECRET).user;
+    next();
+  }catch{res.sendStatus(401);}
+}
+
+app.post("/api/login",(req,res)=>{
+  if(!users[req.body.user]) return res.sendStatus(401);
+  if(!bcrypt.compareSync(req.body.pass,users[req.body.user])) return res.sendStatus(401);
+  res.json({token:jwt.sign({user:req.body.user},process.env.JWT_SECRET)});
 });
 
-app.listen(PORT, () => {
-  console.log("Dashboard running on http://localhost:" + PORT);
+app.get("/api/services",auth,(req,res)=>{
+  const r={};
+  SERVICES.forEach(s=>{
+    try{execSync(`systemctl is-active ${s}`);r[s]="running";}
+    catch{r[s]="stopped";}
+  });
+  res.json(r);
 });
+
+app.post("/api/restart",auth,(req,res)=>{
+  execSync(`systemctl restart ${req.body.service}`);
+  res.send("restarted");
+});
+
+app.get("/api/projects",auth,(req,res)=>{
+  res.json(JSON.parse(execSync("pm2 jlist").toString()));
+});
+
+app.get("/api/logs",auth,(req,res)=>{
+  res.send(execSync(`pm2 cat ${req.query.name} --lines 50`).toString());
+});
+
+app.listen(process.env.PORT,()=>console.log("DashboardXE running"));
 EOF
 
-pm2 start server.js --name devops-dashboard
+# ---------- UI ----------
+cat > $APPDIR/public/index.html <<EOF
+<!DOCTYPE html>
+<html>
+<head>
+<title>DashboardXE</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>DashboardXE</h1>
+<input id="u" placeholder="user"><input id="p" placeholder="pass" type="password">
+<button onclick="login()">Login</button>
+<pre id="out"></pre>
+<script src="app.js"></script>
+</body>
+</html>
+EOF
+
+cat > $APPDIR/public/app.js <<EOF
+let token="";
+function login(){
+ fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
+ body:JSON.stringify({user:u.value,pass:p.value})})
+ .then(r=>r.json()).then(d=>{token=d.token;out.textContent="Logged in"});
+}
+EOF
+
+cat > $APPDIR/public/style.css <<EOF
+body{background:#111;color:#eee;font-family:sans-serif;padding:20px}
+input,button{margin:5px}
+EOF
+
+# ---------- PM2 ----------
+cat > $APPDIR/ecosystem.config.js <<EOF
+module.exports={
+ apps:[{
+   name:"DashboardXE",
+   script:"server.js",
+   cwd:"$APPDIR",
+   env:{NODE_ENV:"production"}
+ }]
+}
+EOF
+
+cd $APPDIR
+npm install
+pm2 start ecosystem.config.js
 pm2 save
 
-### 9. FINISH
-echo "=================================================="
-echo " ✅ INSTALL COMPLETE"
-echo "=================================================="
-echo "Dashboard: http://localhost:9001"
-echo "phpMyAdmin: http://localhost:8081"
-echo "pgAdmin: http://localhost:8082"
-echo "Mongo Express: http://localhost:8083"
+# ---------- SELF HEAL ----------
+cat > $BASE/self-heal.sh <<EOF
+#!/bin/bash
+if ! ss -tulpn | grep -q :$PORT; then
+ pm2 restart DashboardXE || pm2 start $APPDIR/ecosystem.config.js
+fi
+EOF
+
+chmod +x $BASE/self-heal.sh
+(crontab -l 2>/dev/null; echo "*/2 * * * * $BASE/self-heal.sh") | crontab -
+
+echo "✅ DashboardXE installed"
+echo "🌐 http://localhost:$PORT"
+echo "🔐 admin / admin"
