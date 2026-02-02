@@ -4,53 +4,122 @@ set -e
 APP=dashboardxe
 BASE=/opt/$APP
 APPDIR=$BASE/app
+DOCKERDIR=$BASE/docker
 PORT=9010
 
-echo "================================================="
-echo "🔥 DASHBOARDXE – FULL FORCE SELF HEALING INSTALL"
-echo "================================================="
+echo "======================================================"
+echo "🔥 DASHBOARDXE – ULTIMATE FORCE SELF-HEAL INSTALLER"
+echo "======================================================"
 
-### 1. HARD RESET
-pm2 kill || true
-systemctl stop apache2 || true
-docker stop $(docker ps -aq) 2>/dev/null || true
+### ===============================
+### 1️⃣ TOTAL PURGE (KNOWN ERRORS)
+### ===============================
+echo "[1/10] Force removing Node / npm / PM2 / Docker / containerd"
 
-apt-mark unhold nodejs npm || true
-apt remove -y nodejs npm pm2 || true
-rm -rf /usr/lib/node_modules /usr/local/lib/node_modules ~/.npm ~/.pm2
+pm2 kill 2>/dev/null || true
+systemctl stop apache2 docker containerd 2>/dev/null || true
+
+apt-mark unhold nodejs npm containerd containerd.io docker docker.io || true
+
+apt remove -y \
+  nodejs npm pm2 \
+  docker docker.io docker-compose docker-compose-plugin \
+  containerd containerd.io || true
+
+apt purge -y containerd || true
+
+rm -rf \
+  /usr/lib/node_modules \
+  /usr/local/lib/node_modules \
+  /var/lib/docker \
+  /var/lib/containerd \
+  ~/.npm ~/.pm2 \
+  $BASE
+
 apt autoremove -y
 apt clean
 rm -rf /var/lib/apt/lists/*
-dpkg --configure -a || true
-apt --fix-broken install -y || true
 apt update
 
-### 2. INSTALL CORE
-apt install -y curl ca-certificates gnupg apache2 ufw docker.io docker-compose
+dpkg --configure -a || true
+apt --fix-broken install -y || true
+
+### ===============================
+### 2️⃣ CORE PACKAGES
+### ===============================
+echo "[2/10] Installing core system packages"
+
+apt install -y \
+  curl ca-certificates gnupg lsb-release \
+  apache2 ufw software-properties-common
+
+### ===============================
+### 3️⃣ NODE.JS (SAFE METHOD)
+### ===============================
+echo "[3/10] Installing Node.js 20 LTS"
 
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt install -y nodejs
 apt-mark hold npm
 
-npm install -g pm2
+node -v
+npm -v
 
-systemctl enable apache2 docker
-systemctl start apache2 docker
+### ===============================
+### 4️⃣ PM2
+### ===============================
+echo "[4/10] Installing PM2"
+
+npm install -g pm2
+pm2 startup systemd -u root --hp /root || true
+
+### ===============================
+### 5️⃣ DOCKER (OFFICIAL ONLY)
+### ===============================
+echo "[5/10] Installing Docker (official)"
+
+curl -fsSL https://get.docker.com | bash -
+systemctl enable docker
+systemctl start docker
+
+apt-mark hold docker-ce docker-ce-cli containerd.io
+
+docker --version
+containerd --version
+
+### ===============================
+### 6️⃣ FIREWALL
+### ===============================
+echo "[6/10] Configuring firewall"
 
 ufw allow 80
 ufw allow 443
+ufw allow 9010
 ufw allow 8081
 ufw allow 8082
 ufw allow 8083
-ufw allow $PORT
+ufw --force enable || true
 
-### 3. CREATE STRUCTURE
-rm -rf $BASE
-mkdir -p $APPDIR/{public,file-root,ssl/certs,ssl/keys,backups}
-mkdir -p $BASE/docker
+### ===============================
+### 7️⃣ DIRECTORY STRUCTURE
+### ===============================
+echo "[7/10] Creating directory structure"
+
+mkdir -p \
+  $APPDIR/public \
+  $APPDIR/file-root \
+  $APPDIR/ssl/certs \
+  $APPDIR/ssl/keys \
+  $APPDIR/backups \
+  $DOCKERDIR
+
 cd $APPDIR
 
-### 4. DASHBOARD BACKEND
+### ===============================
+### 8️⃣ DASHBOARD BACKEND
+### ===============================
+echo "[8/10] Writing backend code"
+
 cat > package.json <<EOF
 {
   "name": "dashboardxe",
@@ -71,7 +140,7 @@ module.exports = {
   apps: [{
     name: "DashboardXE",
     script: "server.js",
-    env: { PORT: $PORT }
+    env: { PORT: 9010 }
   }]
 }
 EOF
@@ -132,28 +201,18 @@ app.get("/api/logs",auth,(r,s)=>{
  s.send(execSync(`pm2 logs ${r.query.name} --lines 50 --nostream`).toString());
 });
 
-app.post("/api/deploy",auth,(r,s)=>{
- const p=r.body.path;
- if(!fs.existsSync(p))return s.send("Not found");
- if(fs.existsSync(p+"/package.json")){
-  execSync("npm install",{cwd:p});
-  execSync(`pm2 start ${p} --name ${path.basename(p)}`);
-  pm2save();
-  return s.send("Node deployed");
- }
- s.send("Unknown project");
-});
-
-function pm2save(){try{execSync("pm2 save");}catch{}}
-
-function safe(p=""){const r=path.resolve(ROOT,p);if(!r.startsWith(ROOT))throw"";return r;}
+function safe(p=""){
+ const r=path.resolve(ROOT,p);
+ if(!r.startsWith(ROOT))throw "";
+ return r;
+}
 
 app.get("/api/files",auth,(r,s)=>{
  s.json(fs.readdirSync(safe(r.query.path||"")));
 });
 
-const up=multer({dest:ROOT});
-app.post("/api/upload",auth,up.single("f"),(r,s)=>{
+const upload=multer({dest:ROOT});
+app.post("/api/upload",auth,upload.single("file"),(r,s)=>{
  fs.renameSync(r.file.path,safe(r.file.originalname));
  s.send("Uploaded");
 });
@@ -177,15 +236,23 @@ app.post("/api/ssl",auth,(r,s)=>{
 app.listen(PORT,()=>console.log("DashboardXE on "+PORT));
 EOF
 
-### 5. FRONTEND
-cat > public/index.html <<'EOF'
+### ===============================
+### 9️⃣ FRONTEND
+### ===============================
+echo "[9/10] Writing frontend UI"
+
+cat > public/index.html <<EOF
 <!DOCTYPE html>
 <html>
-<head><title>DashboardXE</title><link rel="stylesheet" href="style.css"></head>
+<head>
+<title>DashboardXE</title>
+<link rel="stylesheet" href="style.css">
+</head>
 <body>
 <h1>DashboardXE</h1>
 <div id="login">
-<input id="u" value="admin"><input id="p" value="admin">
+<input id="u" value="admin">
+<input id="p" value="admin" type="password">
 <button onclick="login()">Login</button>
 </div>
 <pre id="out"></pre>
@@ -194,16 +261,16 @@ cat > public/index.html <<'EOF'
 </html>
 EOF
 
-cat > public/app.js <<'EOF'
-let t="";
+cat > public/app.js <<EOF
+let token="";
 function login(){
  fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
  body:JSON.stringify({user:u.value,pass:p.value})})
- .then(r=>r.json()).then(j=>{t=j.token;load();});
+ .then(r=>r.json()).then(j=>{token=j.token;load();});
 }
 function load(){
- fetch("/api/services",{headers:{Authorization:t}})
- .then(r=>r.json()).then(o=>out.textContent=JSON.stringify(o,null,2));
+ fetch("/api/services",{headers:{Authorization:token}})
+ .then(r=>r.json()).then(d=>out.textContent=JSON.stringify(d,null,2));
 }
 EOF
 
@@ -212,13 +279,16 @@ body{background:#111;color:#0f0;font-family:monospace;padding:20px}
 input,button{margin:5px}
 EOF
 
-### 6. INSTALL & RUN
+### ===============================
+### 🔟 INSTALL, RUN, DOCKER GUIs
+### ===============================
+echo "[10/10] Installing dependencies & starting services"
+
 npm install
 pm2 start ecosystem.config.js
 pm2 save
 
-### 7. DOCKER DB GUIS
-cat > $BASE/docker/docker-compose.yml <<EOF
+cat > $DOCKERDIR/docker-compose.yml <<EOF
 version: "3"
 services:
  phpmyadmin:
@@ -240,10 +310,10 @@ services:
    ME_CONFIG_BASICAUTH_PASSWORD: admin
 EOF
 
-docker-compose -f $BASE/docker/docker-compose.yml up -d
+docker compose -f $DOCKERDIR/docker-compose.yml up -d
 
-echo "================================================="
-echo "✅ DashboardXE READY"
-echo "🌐 http://localhost:$PORT"
-echo "👤 admin / admin"
-echo "================================================="
+echo "======================================================"
+echo "✅ DASHBOARDXE INSTALL COMPLETE"
+echo "🌐 Dashboard: http://localhost:9010"
+echo "👤 Login: admin / admin"
+echo "======================================================"
